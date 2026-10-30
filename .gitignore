@@ -1,7 +1,10 @@
 starter/src/credentials.ts
 starter/src/credentials.ts
+starter/node_modules
 
 rag/data
 rag/qdrant_data
+rag/qdrant_data.zip
+rag/node_modules
 
 dataset/idioms.json
