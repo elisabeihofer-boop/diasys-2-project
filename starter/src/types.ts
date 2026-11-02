@@ -6,6 +6,12 @@ export type Message = {
   content: string;
 };
 
+// ouput type for user content extraction
+export interface ExtractedRequest {
+  idiom: string | null;
+  context: string | null;
+}
+
 export interface DMContext {
   spstRef: AnyActorRef;
   lastResult: Hypothesis[] | null;

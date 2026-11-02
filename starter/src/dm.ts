@@ -1,7 +1,7 @@
 import { assign, createActor, fromPromise, setup } from "xstate";
 import { Settings, speechstate } from "speechstate";
 import { PROXY_KEY, NLU_KEY } from "./credentials";
-import { DMContext, DMEvents, IdiomRecord, Message, NLUObject, IdiomExample } from "./types"; // added Message
+import { DMContext, DMEvents, IdiomRecord, Message, NLUObject, IdiomExample, ExtractedRequest } from "./types"; // added Message
 import OpenAI from "openai";
 import { QdrantClient } from "@qdrant/js-client-rest"; // importing qdrant
 
@@ -23,7 +23,7 @@ const embed = async (input: string) =>
     })
     .then((result) => result.data[0].embedding);
 
-// creating qdrant client
+// creating Qdrant client
 const qdrant = new QdrantClient({
   host: "localhost",
   port: 6333,
@@ -96,6 +96,23 @@ const dmMachine = setup({
       },
     ),
 
+    // using the LLM to extract idiom and context from user utterance
+    extractRequest: fromPromise<ExtractedRequest, { messages: Message[] }>(
+      async ({ input }) => {
+
+      const response = await openai.chat.completions.create({
+        model: "llama3.2:latest",
+        messages: input.messages,
+        response_format: { type: "json_object" },
+      });
+
+      const content = response.choices[0].message.content ?? "{}";
+
+      console.log("LLM response:", content);
+
+      return JSON.parse(content) as ExtractedRequest;
+    }),
+
     // retrieval step: input: user query -> embedded, output: relevant text from qdrant
     queryRAG: fromPromise<IdiomRecord[], { query: string }>(
       async ({ input }) => {
@@ -146,6 +163,9 @@ const dmMachine = setup({
     // storing idiom under discussion
     currentIdiom: "",
 
+    // storing context provided by user
+    userContext: "",
+
     // dialogue history across multiple turns
     messages: [
       {
@@ -163,8 +183,9 @@ const dmMachine = setup({
     Prepare: {
       entry: ({ context }) => context.spstRef.send({ type: "PREPARE" }),
       on: { ASRTTS_READY: "WaitToStart" },
-    },
+    }, // Prepare end
     WaitToStart: {
+      // waiting until the button is clicked
       on: { 
         CLICK: {
           actions: assign({
@@ -173,25 +194,71 @@ const dmMachine = setup({
           target: "Greeting",
         },
       },
-    },
+    }, // WaitToStart end
     Greeting: {
+      // greeting + initial user ask is analyzed
       initial: "Prompt",
       on: {
         LISTEN_COMPLETE: [
-
           
           // detecting intent + recognizing utterance
           // recognition successful -> RAG pipeline
+
+          // user asks about new idiom
           {
             guard: ({ context }) => 
               !!context.lastResult &&
               context.interpretation?.topIntent === "new_idiom" &&
-            // checking for confidence (should be over 60%)
-              getIntentConfidence(context.interpretation, "new_idiom") > 0.6,
-            target: "Retrieve"
+            // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "new_idiom") > 0.65,
+            target: "ExtractRequest"
+          },
+          // user provides context
+          {
+            guard: ({ context }) => 
+              !!context.lastResult &&
+              context.interpretation?.topIntent === "user_context" &&
+            // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "user_context") > 0.65,
+            target: "GetContext" // ???
+          },
+          // user wants the system to provide a context example
+          {
+            guard: ({ context }) => 
+              !!context.lastResult &&
+              context.interpretation?.topIntent === "request_example" &&
+            // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "request_example") > 0.65,
+            target: "GiveContext" // ???
+          },
+          // user wants to hear different context example
+          {
+            guard: ({ context }) => 
+              !!context.lastResult &&
+              context.interpretation?.topIntent === "different_example" &&
+            // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "different_example") > 0.65,
+            target: "GiveContext" // different state ???
+          },
+          // user wants more in depth explanation of the current idiom
+          {
+            guard: ({ context }) => 
+              !!context.lastResult &&
+              context.interpretation?.topIntent === "more_details" &&
+            // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "more_details") > 0.65,
+            target: "GiveDetails" // ???
           },
 
+          // handling unclear input
+
+          { target: "Clarify",
+            guard: ({ context }) => !!context.lastResult, // CHECK !!!!
+          },
+
+
           // handling no input
+
           // third time no input (consecutively)
           { target: ".NoInputFinal",
             guard: ({ context }) => context.noInputCount >= 3,
@@ -201,32 +268,32 @@ const dmMachine = setup({
             target: ".NoInput",
           },
         ],
-      },
+      }, // on: LISTEN_COMPLETE end
       states: {
-        Prompt: {
+        Prompt: { // greeting the user
           entry: { type: "spst.speak", params: { utterance: `Welcome to: What do they actually mean? - your personal idiom explainer` } },
           on: { SPEAK_COMPLETE: "Ask" },
-        },
-        NoInput: {
+        }, // Prompt end
+        NoInput: { // handling first and second time no input
           entry: {
             type: "spst.speak",
             params: ({ context }) => ({
                 utterance:
                   context.noInputCount === 1
                     ? `I didn't hear anything. Please try again.` // if count === 1
-                    : `I still didn't hear anything. Please try one more time`, // if count === 2
+                    : `I still didn't hear anything. Please try one more time`, // if count === 2 (ALSO IF 0 !!!)
             }),
           },
           on: { SPEAK_COMPLETE: "Ask" },
-        },
-        NoInputFinal: {
+        }, // NoInput end
+        NoInputFinal: { // handling third time no input
           entry: {
             type: "spst.speak",
             params: { utterance: `I didn't hear anything. Click to try again! ` }, 
           },
           on: { SPEAK_COMPLETE: "#DM.WaitToStart" }, // sending the user back to the beginning after three times of no input
-        },
-        Ask: {
+        }, // NoInputFinal end
+        Ask: { // handling content of user ask
           entry: [
             assign({ 
               lastResult: null, // resetting lastResult
@@ -237,7 +304,7 @@ const dmMachine = setup({
           on: {
             RECOGNISED: {
               actions: [
-                assign({interpretation: ({ event }) => event.nluValue ?? null}),
+                assign({interpretation: ({ event }) => event.nluValue ?? null}), // extracting intent
               
                 assign(({ context, event }) => {
                   const utterance = event.value[0].utterance; // extracting what the user said
@@ -255,25 +322,110 @@ const dmMachine = setup({
                   };
                 }),
               ],
-            },
+            }, // RECOGNISED end
             ASR_NOINPUT: {
 
-              // handling no input
+              // handling no input counter
               actions:
                 assign(({ context }) => ({
                     lastResult: null, // no Input -> clear lastResult
                     noInputCount: context.noInputCount + 1, // increasing the count by one
               })),
-            },
-          },
+            }, // ASR_NOINPUT end
+          }, // on: end
+        }, // Ask end
+      },
+    }, // Greeting end
+    Clarify: {
+      // the system did not understand / the user utterance did not match any intent
+      // the system asks the user to repeat their ask
+
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance:
+            "Sorry, I didn't understand. Could you rephrase your question?",
         },
       },
-    },
-    Retrieve: { // invoking queryRAG to pass latest user utterance
+      on: {
+        SPEAK_COMPLETE: "Greeting.Ask", // change to whatever state it came from !!!!
+      },
+    }, // Clarify end
+    ExtractRequest: {
+      // sending the user utterance to LLM to extract the new idiom and possibly the context
+      invoke: {
+        src: "extractRequest",
+        input: ({ context }) => ({
+          messages: [
+            {
+              role: "system" as const,
+              content: `
+                Extract the idiom and any situation or context provided by the user.
+
+                Return ONLY a JSON object with:
+                - idiom: the expression the user asks about
+                - context: the situation in which they heard it
+
+                If no context is provided, use null.
+                If no idiom is identifiable, use null.
+                Do not change anything about the user's context.
+
+                Do not explain the idiom.
+
+                Example: 
+                {"idiom":"break the ice", "context":"My teacher said it yesterday."}
+              `
+            },
+            {
+              role: "user",
+              content: context.lastResult?.[0]?.utterance ?? "",
+            },
+          ],
+        }),
+
+        // saving current idiom and user context
+        onDone: [
+          {
+            guard: ({ event }) => !!event.output.idiom?.trim(), // going to Retrieval only if idiom was extracted
+            actions: assign({
+              currentIdiom: ({ event }) => event.output.idiom ?? "", // resetting/overwriting !!!!
+              userContext: ({ event }) => event.output.context ?? "", // resetting/overwriting !!!!
+            }),
+            target: "Retrieve", // ???
+          },
+          {
+            target: "Clarify",
+          },
+        ],
+      }, // CHECK !!!!
+    }, // ExtractRequest end
+    GetContext: {
+      // the user has provided context for the idiom
+      // store context
+      // give to LLM
+      // LLM uses retrieved RAG data (but does not retrieve again)
+      // LLM speaks answer
+    }, // GetContext end
+    AskContext: {
+      // user has not provided context, so system asks for context
+      // before or after general explanation ???
+
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance: "Where did you hear this expression, or how was it used?",
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "Greeting", // change to AwaitContext ????
+      },
+    }, // AskContext end
+    Retrieve: { 
+      // invoking queryRAG to pass latest user utterance
       invoke: {
         src: "queryRAG",
         input: ({ context }) => ({
-  		    query: context.lastResult![0].utterance,
+  		    query: context.currentIdiom, // querying using currentIdiom
         }),
 
         // keeping the latest two user utterances for retrieval
@@ -306,7 +458,7 @@ const dmMachine = setup({
             // storing the retrieved info (for augmentation step)
             assign({
               retrievedIdioms: ({ event }) => event.output,
-              currentIdiom: ({ event }) => event.output[0]?.idiom ?? "",
+              //currentIdiom: ({ event }) => event.output[0]?.idiom ?? "", // !!!
             }),
           
             ({ event }) => {
@@ -314,11 +466,31 @@ const dmMachine = setup({
             },
           ],
 
-          target: "GetCompletion",
+          target: "CheckContext",
         },
       },
-    },
+    }, // Retrieve end
+    CheckContext: {
+      // checking if the user has already provided context
+      always: [
+        {
+          guard: ({ context }) => context.userContext.trim().length > 0,
+          target: "GetContext",
+        },
+        {
+          target: "AskContext", // if not: ask for context
+        },
+      ],
+    }, // CheckContext end
+    GiveContext: {
+      // the user wants to hear an example context from the system
+      // possibly: the user wants to hear another example context from the system
+    }, // GiveContext end
+    GiveDetails: {
+      // the user wants to know more details about the idiom (register, difficulty, why it's idiomatic)
+    }, // GiveDetails end
     GetCompletion: {
+      // the LLM is prompted with the retrieved context
       invoke: {
         src: "fetchLLM",
         input: ({ context }) => ({
@@ -368,8 +540,9 @@ const dmMachine = setup({
         target: "SpeakResponse",
         },
       },
-    },
+    }, // GetCompletion end
     SpeakResponse: {
+      // the system speaks the LLM generated response
       entry: {
         type: "spst.speak",
         params: ({ context }) => ({
@@ -381,7 +554,7 @@ const dmMachine = setup({
           target: "Greeting.Ask",
         },
       },
-    },
+    }, // SpeakResponse end
   },
 });
 
