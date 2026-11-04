@@ -256,14 +256,20 @@ const dmMachine = setup({
             target: "GiveDetails" // ???
           },
 
-          // handling unclear input
+          // user says no (from AnythingMore)
+          {
+            guard: ({ context }) => 
+              !!context.lastResult &&
+              context.interpretation?.topIntent === "negation" &&
+            // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "negation") > 0.65,
+            target: "Done"
+          },
 
+          // handling unclear input
           { target: "Clarify",
             guard: ({ context }) => !!context.lastResult, // CHECK !!!!
           },
-
-          // handling no input
-          // ... globally (user needs to be sent back to state they came from) !!!!
 
           // third time no input (consecutively)
           { target: ".NoInputFinal",
@@ -335,6 +341,7 @@ const dmMachine = setup({
               actions:
                 assign(({ context }) => ({
                     lastResult: null, // no Input -> clear lastResult
+                    interpretation: null, // clear interpretation !!!!
                     noInputCount: context.noInputCount + 1, // increasing the count by one
               })),
             }, // ASR_NOINPUT end
@@ -520,38 +527,14 @@ const dmMachine = setup({
     GetContext: {
       // the user provides context for the idiom
       // store context
-      // give to LLM
-      // (LLM uses retrieved RAG data (but does not retrieve again))
+      // give to LLM (LLM uses retrieved RAG data (but does not retrieve again))
 
-      entry: [
-        assign({
-          lastResult: null,
-          interpretation: null,
-        }),
-        { type: "spst.listen" },
-      ],
+      initial: "Listen",
+
       on: {
-        // saving utterance contents
-        RECOGNISED: {
-          actions: [
-            assign({interpretation: ({ event }) => event.nluValue ?? null}), // extracting intent
-          
-            assign(({ context, event }) => ({
-                lastResult: event.value, // updating lastResult with what user said
-                messages: [
-                  ...context.messages, // appending to convo history
-                  {
-                    role: "user" as const, // as user message
-                    content: event.value[0].utterance,
-                  },
-                ],
-                noInputCount: 0, // resetting no input counter if utterance recognised !!!
-            })),
-          ],
-        },
-
         // deciding next dialogue step
         LISTEN_COMPLETE: [
+
           // user provides context
           {
             guard: ({ context }) => 
@@ -571,14 +554,14 @@ const dmMachine = setup({
             target: "GetCompletion" // sending to LLM
           },
 
-          // user does not have context !!!! train (Azure) !!!
-          /**{
+          // user does not have context
+          {
             guard: ({ context }) =>
               !!context.lastResult &&
               context.interpretation?.topIntent === "no_context" &&
               getIntentConfidence(context.interpretation, "no_context") > 0.65,
-            target: "GiveContext",
-          }, **/
+            target: "ConfirmExample",
+          },
 
           // user wants the system to provide a context example
           {
@@ -592,12 +575,100 @@ const dmMachine = setup({
 
           // else:
           {
-            target: "Clarify" // Add smth to allow saying no (context) + "Alright, then I will give you an example." !!!!
+            guard: ({ context }) => !!context.lastResult,
+            target: "Clarify"
+          },
+
+          // third consecutive time no input
+          {
+            guard: ({ context }) =>
+              !context.lastResult && context.noInputCount >= 3,
+            target: ".NoInputFinal",
+          },
+
+          // first or second no input
+          {
+            guard: ({ context }) => !context.lastResult,
+            target: ".NoInput",
           },
         ],
       },
 
+      states: {
+        Listen: {
+          entry: [
+            assign({
+              lastResult: null,
+              interpretation: null,
+            }),
+            { type: "spst.listen" },
+          ],
+
+          on: {
+            // saving utterance contents
+            RECOGNISED: {
+              actions: [
+                assign({interpretation: ({ event }) => event.nluValue ?? null}), // extracting intent
+              
+                assign(({ context, event }) => ({
+                    lastResult: event.value, // updating lastResult with what user said
+                    messages: [
+                      ...context.messages, // appending to convo history
+                      {
+                        role: "user" as const, // as user message
+                        content: event.value[0].utterance,
+                      },
+                    ],
+                    noInputCount: 0, // resetting no input counter if utterance recognised !!!
+                })),
+              ],
+            },
+
+            // or handling no input
+            ASR_NOINPUT: {
+              // handling no input counter
+              actions: assign(({ context }) => ({
+                    lastResult: null, // no Input -> clear lastResult
+                    interpretation: null, // clear interpretation
+                    noInputCount: context.noInputCount + 1, // increasing the count by one
+              })),
+            }, // ASR_NOINPUT end
+          },
+        },
+        NoInput: { // handling first and second time no input
+          entry: {
+            type: "spst.speak",
+            params: ({ context }) => ({
+                utterance:
+                  context.noInputCount === 1
+                    ? `I didn't hear anything. Please try again.` // if count === 1
+                    : `I still didn't hear anything. Please try one more time`, // if count === 2 (ALSO IF 0 !!!)
+            }),
+          },
+          on: { SPEAK_COMPLETE: "Listen" },
+        }, // NoInput end        
+        NoInputFinal: { // handling third time no input
+          entry: {
+            type: "spst.speak",
+            params: { utterance: `I didn't hear anything. Click to try again! ` }, 
+          },
+          on: { SPEAK_COMPLETE: "#DM.WaitToStart" }, // sending the user back to the beginning after three times of no input
+        }, // NoInputFinal end
+      }, // states end  
     }, // GetContext end
+    ConfirmExample: {
+      // system lets the user know it will provide an example
+
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance: "No worries, I'll give you an example.",
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "GiveContext",
+      },
+    }, // ConfirmExample end
     GiveContext: {
       // the user wants to hear an example context from the system
       // or: the user wants to hear another example context from the system
@@ -801,6 +872,8 @@ const dmMachine = setup({
       },
     }, // SpeakResponse end
     AnythingMore: {
+      // system asks if there's anything else the user wants to know
+
       entry: {
         type: "spst.speak",
         params: {
@@ -812,6 +885,8 @@ const dmMachine = setup({
       },
     }, // AnythingMore end
     Done: {
+      // end state
+
       entry: {
         type: "spst.speak",
         params: {
