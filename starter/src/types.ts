@@ -6,11 +6,18 @@ export type Message = {
   content: string;
 };
 
-// ouput type for user content extraction
+// output type for user content extraction
 export interface ExtractedRequest {
   idiom: string | null;
   context: string | null;
 }
+
+// output type for dialogue intent variable (manually set)
+export type DialogueIntent =
+  | "explain_idiom"
+  | "explain_context"
+  | "request_example"
+  | "more_details";
 
 export interface DMContext {
   spstRef: AnyActorRef;
@@ -28,9 +35,10 @@ export interface DMContext {
   currentIdiom: string; // idiom under discussion
   userContext: string; // context for idiom provided by user
   retrievedIdioms: IdiomRecord[]; // results from Qdrant (RAG)
-  dialogueIntent: string; // what user wants to do
-  usedExampleIndices: []; // examples (from Qdrant) already used
-  needsContext: boolean; // whether system should ask user for context
+  dialogueIntent: DialogueIntent; // what user wants to do
+  selectedExample: IdiomExample | null; // RAG example selected by LLM
+  usedExampleIndices: number[]; // examples (from Qdrant) already used
+  needsContext: boolean; // whether system should ask user for context !!!!
 
 }
 

@@ -1,7 +1,7 @@
 import { assign, createActor, fromPromise, setup } from "xstate";
 import { Settings, speechstate } from "speechstate";
 import { PROXY_KEY, NLU_KEY } from "./credentials";
-import { DMContext, DMEvents, IdiomRecord, Message, NLUObject, IdiomExample, ExtractedRequest } from "./types"; // added Message
+import { DMContext, DMEvents, IdiomRecord, Message, NLUObject, IdiomExample, ExtractedRequest, DialogueIntent } from "./types";
 import OpenAI from "openai";
 import { QdrantClient } from "@qdrant/js-client-rest"; // importing qdrant
 
@@ -122,7 +122,7 @@ const dmMachine = setup({
         const result = await qdrant.query("idioms", {
           query: embedding,
           with_payload: true,
-          limit: 3,
+          limit: 1,
         });
       
         // converting returned payloads into array
@@ -154,24 +154,31 @@ const dmMachine = setup({
   context: ({ spawn }) => ({
     spstRef: spawn(speechstate, { input: settings }),
 
-    // Adding interpretation
+    // adding interpretation (for intents)
     interpretation: null as NLUObject | null,
 
-    // storing ASR results for current turn -> resets before going back to listening
+    // for storing ASR results for current turn -> resets before going back to listening
     lastResult: null,
 
-    // storing idiom under discussion
+    // for storing idiom under discussion
     currentIdiom: "",
 
-    // storing context provided by user
+    // for storing context provided by user
     userContext: "",
+
+    // used to distiguish tasks in LLM prompt
+    dialogueIntent: "explain_idiom" as DialogueIntent,
+
+    // for storing selected RAG example (by system)
+    selectedExample: null as IdiomExample | null,
+    usedExampleIndices: [] as number[],
 
     // dialogue history across multiple turns
     messages: [
       {
         role: "system",
         content:
-          "You are a helpful assistant for University of Gothenburg students.",
+          "You are a helpful idiom explainer for English language learners.",
       },
     ] as Message[],
     retrievedIdioms: [] as IdiomRecord[], // to store converted Qdrant arrays for current query
@@ -201,8 +208,7 @@ const dmMachine = setup({
       on: {
         LISTEN_COMPLETE: [
           
-          // detecting intent + recognizing utterance
-          // recognition successful -> RAG pipeline
+          // detecting intent (NLU) + recognizing utterance
 
           // user asks about new idiom
           {
@@ -211,7 +217,7 @@ const dmMachine = setup({
               context.interpretation?.topIntent === "new_idiom" &&
             // checking for confidence (should be over 65%)
               getIntentConfidence(context.interpretation, "new_idiom") > 0.65,
-            target: "ExtractRequest"
+            target: "ExtractRequest" // -> RAG pipeline
           },
           // user provides context
           {
@@ -256,8 +262,8 @@ const dmMachine = setup({
             guard: ({ context }) => !!context.lastResult, // CHECK !!!!
           },
 
-
           // handling no input
+          // ... globally (user needs to be sent back to state they came from) !!!!
 
           // third time no input (consecutively)
           { target: ".NoInputFinal",
@@ -353,6 +359,13 @@ const dmMachine = setup({
     }, // Clarify end
     ExtractRequest: {
       // sending the user utterance to LLM to extract the new idiom and possibly the context
+      
+      // setting dialogue intent (unnecessary here?) ????
+      entry: assign({
+        dialogueIntent: "explain_idiom"
+       }),
+
+      // prompting LLM
       invoke: {
         src: "extractRequest",
         input: ({ context }) => ({
@@ -362,18 +375,23 @@ const dmMachine = setup({
               content: `
                 Extract the idiom and any situation or context provided by the user.
 
+                Do NOT make up a context if none is provided!
+
                 Return ONLY a JSON object with:
                 - idiom: the expression the user asks about
                 - context: the situation in which they heard it
 
-                If no context is provided, use null.
-                If no idiom is identifiable, use null.
+                If no context is provided, use the JSON value null, NOT the string "null".
+                If no idiom is identifiable, use JSON value null, NOT the string "null".
                 Do not change anything about the user's context.
 
                 Do not explain the idiom.
 
                 Example: 
                 {"idiom":"break the ice", "context":"My teacher said it yesterday."}
+
+                Example:
+                {"idiom": "hit the nail on the head", "context": null}
               `
             },
             {
@@ -389,7 +407,25 @@ const dmMachine = setup({
             guard: ({ event }) => !!event.output.idiom?.trim(), // going to Retrieval only if idiom was extracted
             actions: assign({
               currentIdiom: ({ event }) => event.output.idiom ?? "", // resetting/overwriting !!!!
-              userContext: ({ event }) => event.output.context ?? "", // resetting/overwriting !!!!
+              userContext: ({ event }) => { // resetting/overwriting !!!!
+                // accounting for cases when the LLM might return "null" instead of null
+                const value = event.output.context;
+
+                if (
+                  value == null ||
+                  typeof value !== "string" ||
+                  value.trim().toLowerCase() === "null"
+                ) {
+                  return "";
+                }
+                return value.trim();
+              },
+
+              // resetting upon successful extraction of new idiom
+              dialogueIntent: "explain_idiom",
+              selectedExample: null,
+              usedExampleIndices: [],
+              retrievedIdioms: [],
             }),
             target: "Retrieve", // ???
           },
@@ -399,27 +435,6 @@ const dmMachine = setup({
         ],
       }, // CHECK !!!!
     }, // ExtractRequest end
-    GetContext: {
-      // the user has provided context for the idiom
-      // store context
-      // give to LLM
-      // LLM uses retrieved RAG data (but does not retrieve again)
-      // LLM speaks answer
-    }, // GetContext end
-    AskContext: {
-      // user has not provided context, so system asks for context
-      // before or after general explanation ???
-
-      entry: {
-        type: "spst.speak",
-        params: {
-          utterance: "Where did you hear this expression, or how was it used?",
-        },
-      },
-      on: {
-        SPEAK_COMPLETE: "Greeting", // change to AwaitContext ????
-      },
-    }, // AskContext end
     Retrieve: { 
       // invoking queryRAG to pass latest user utterance
       invoke: {
@@ -475,19 +490,180 @@ const dmMachine = setup({
       always: [
         {
           guard: ({ context }) => context.userContext.trim().length > 0,
-          target: "GetContext",
+
+          // setting dialogue intent
+          actions: assign({
+            dialogueIntent: "explain_context"
+          }),
+
+          target: "GetCompletion", // sending to LLM
         },
         {
           target: "AskContext", // if not: ask for context
         },
       ],
     }, // CheckContext end
+    AskContext: {
+      // user has not provided context, so system asks for context
+      // before general explanation !!!
+
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance: "Where did you hear this expression, or how was it used?",
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "GetContext",
+      },
+    }, // AskContext end
+    GetContext: {
+      // the user provides context for the idiom
+      // store context
+      // give to LLM
+      // (LLM uses retrieved RAG data (but does not retrieve again))
+
+      entry: [
+        assign({
+          lastResult: null,
+          interpretation: null,
+        }),
+        { type: "spst.listen" },
+      ],
+      on: {
+        // saving utterance contents
+        RECOGNISED: {
+          actions: [
+            assign({interpretation: ({ event }) => event.nluValue ?? null}), // extracting intent
+          
+            assign(({ context, event }) => ({
+                lastResult: event.value, // updating lastResult with what user said
+                messages: [
+                  ...context.messages, // appending to convo history
+                  {
+                    role: "user" as const, // as user message
+                    content: event.value[0].utterance,
+                  },
+                ],
+                //noInputCount: 0, // resetting no input counter if utterance recognised !!!
+            })),
+          ],
+        },
+
+        // deciding next dialogue step
+        LISTEN_COMPLETE: [
+          {
+            // user provides context
+            guard: ({ context }) => 
+              !!context.lastResult &&
+              context.interpretation?.topIntent === "user_context" &&
+            // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "user_context") > 0.65,
+
+            // storing user context
+            actions: assign({
+              userContext: ({ context }) =>
+                context.lastResult?.[0]?.utterance ?? "",
+              // setting dialogue intent
+              dialogueIntent: "explain_context",
+            }),
+
+            target: "GetCompletion" // sending to LLM
+          },
+
+          // user does not have context !!!! train (Azure) !!!
+          /**{
+            guard: ({ context }) =>
+              !!context.lastResult &&
+              context.interpretation?.topIntent === "no_context" &&
+              getIntentConfidence(context.interpretation, "no_context") > 0.65,
+            target: "GiveContext",
+          }, **/
+
+          // user wants the system to provide a context example
+          {
+            guard: ({ context }) => 
+              !!context.lastResult &&
+              context.interpretation?.topIntent === "request_example" &&
+            // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "request_example") > 0.65,
+            target: "GiveContext"
+          },
+
+          // else:
+          {
+            target: "Clarify" // Add smth to allow saying no (context) + "Alright, then I will give you an example." !!!!
+          },
+        ],
+      },
+
+    }, // GetContext end
     GiveContext: {
       // the user wants to hear an example context from the system
       // possibly: the user wants to hear another example context from the system
+
+      //dialogueIntent: "request_example",
+
+      entry: [
+
+          // setting dialogue intent
+          assign({
+            dialogueIntent: "request_example",
+          }),
+
+          assign(({ context }) => {
+
+          // accessing retrieved Qdrant examples (filtering by currentIdiom)
+          const record = context.retrievedIdioms.find(
+            (item) =>
+              item.idiom.toLowerCase() ===
+              context.currentIdiom.toLowerCase()
+          );
+
+          const examples = record?.example ?? [];
+        
+          // finding first unused example
+          const nextIndex = examples.findIndex(
+            (_, index) => !context.usedExampleIndices.includes(index)
+          );
+
+          // storing that example (or returning null if none left)
+          if (nextIndex === -1) {
+            return {
+              selectedExample: null, // UPGRADE !!!!
+            };
+          }
+
+          // recording all selected example indices
+          return {
+            selectedExample: examples[nextIndex],
+            usedExampleIndices: [
+              ...context.usedExampleIndices,
+              nextIndex,
+            ],
+          };
+        }),
+
+        // debugging logs
+        ({ context }) => {
+          console.log("GiveContext entered");
+          console.log("Selected example:", context.selectedExample);
+          console.log("Used indices:", context.usedExampleIndices);
+        },
+      ],
+
+      always: {
+        target: "GetCompletion",
+      },
     }, // GiveContext end
     GiveDetails: {
       // the user wants to know more details about the idiom (register, difficulty, why it's idiomatic)
+
+      // setting dialogue intent
+      entry: assign({
+        dialogueIntent: "more_details"
+      }),
+
     }, // GiveDetails end
     GetCompletion: {
       // the LLM is prompted with the retrieved context
@@ -501,6 +677,19 @@ const dmMachine = setup({
               // augmentation step: retrieved qdrant context -> system prompt
               content: `
                 You are an assistant for language learners of English. You explain idioms.
+
+                You give short, concise answers.
+
+                Current task: ${context.dialogueIntent}
+
+                Follow the current task:
+                - explain_idiom: Explain the general meaning of the idiom.
+                - explain_context: Explain what the idiom means in the user's situation. (use user context)
+                - request_example: Present the selected example and explain it. (use selected example)
+                - more_details: Provide additional information about usage, register, or why the expression is idiomatic.
+
+                Only perform the current task.
+                Keep responses short and suitable for spoken dialogue.
                 
                 Use the retrieved information below to answer the user's question.
                 If the answer is not supported by the retrieved information, 
@@ -515,11 +704,29 @@ const dmMachine = setup({
                 Explain the idiom in simple English.
                 If the user provided context, explain what the idiom means in that context.
 
+                USER CONTEXT START
+
+                ${context.userContext}
+
+                USER CONTEXT END
+
                 The retrieved examples may contain both literal and idiomatic uses of the expression.
                 Use the user's context (if available) to determine which interpretation is appropriate.
 
-                When providing an example of idiomatic usage, prefer examples that clearly demonstrate the figurative meaning.
-                Do not assume every retrieved example is idiomatic.
+                If the current task is request_example:
+                Present the selected example in full to the learner and explain its meaning in simple English.
+
+                Use the selected example rather than generating a new one.
+                Do not repeat previously presented examples.
+                Do not assume every selected example is idiomatic.
+
+                Keep the explanation to two or three short sentences.
+
+                SELECTED EXAMPLE START
+                
+                ${JSON.stringify(context.selectedExample, null, 2)}
+
+                SELECTED EXAMPLE END
 
                 Keep the responses concise and efficient.
               `,
@@ -543,18 +750,31 @@ const dmMachine = setup({
     }, // GetCompletion end
     SpeakResponse: {
       // the system speaks the LLM generated response
-      entry: {
-        type: "spst.speak",
-        params: ({ context }) => ({
-          utterance: context.messages[context.messages.length - 1].content,
-        }),
-      },
+      entry: [
+        {
+          type: "spst.speak",
+          params: ({ context }) => ({
+            utterance: context.messages[context.messages.length - 1].content,
+          }),
+        },
+      ],
       on: {
         SPEAK_COMPLETE: {
-          target: "Greeting.Ask",
+          target: "AnythingMore",
         },
       },
     }, // SpeakResponse end
+    AnythingMore: {
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance: "Anything more?"
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "Greeting.Ask",
+      },
+    }, // AnythingMore end
   },
 });
 
@@ -562,9 +782,21 @@ const dmActor = createActor(dmMachine, {}).start();
 
 dmActor.subscribe((state) => {
   console.group("State update");
+
   console.log("State value:", state.value);
   console.log("State context:", state.context);
+  console.log("Dialogue intent:", state.context.dialogueIntent);
+
+  console.log("Detected intent:", state.context.interpretation?.topIntent);
+
+  console.log("Current idiom:", state.context.currentIdiom);
+  console.log("User context:", state.context.userContext);
+
+  console.log("Selected example:", state.context.selectedExample);
+  console.log("Used indices:", state.context.usedExampleIndices);
+
   console.log("No-input count:", state.context.noInputCount); // checking the no input counter
+
   console.groupEnd();
 });
 
