@@ -38,8 +38,6 @@ export interface DMContext {
   dialogueIntent: DialogueIntent; // what user wants to do
   selectedExample: IdiomExample | null; // RAG example selected by LLM
   usedExampleIndices: number[]; // examples (from Qdrant) already used
-  needsContext: boolean; // whether system should ask user for context !!!!
-
 }
 
 // structure for each idiom example

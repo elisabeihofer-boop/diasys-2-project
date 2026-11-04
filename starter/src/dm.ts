@@ -283,7 +283,7 @@ const dmMachine = setup({
       }, // on: LISTEN_COMPLETE end
       states: {
         Prompt: { // greeting the user
-          entry: { type: "spst.speak", params: { utterance: `Welcome to: What do they actually mean? - your personal idiom explainer. Which idiom is on your mind today?` } },
+          entry: { type: "spst.speak", params: { utterance: `Welcome to Idiomagic - your personal idiom explainer. Which idiom is on your mind today?` } },
           on: { SPEAK_COMPLETE: "Ask" },
         }, // Prompt end
         NoInput: { // handling first and second time no input
@@ -903,6 +903,7 @@ const dmMachine = setup({
 
 const dmActor = createActor(dmMachine, {}).start();
 
+// logs
 dmActor.subscribe((state) => {
   console.group("State update");
 
@@ -923,16 +924,62 @@ dmActor.subscribe((state) => {
   console.groupEnd();
 });
 
+// user interface
+
+// changing button text
 export function setupButton(element: HTMLButtonElement) {
   element.addEventListener("click", () => {
     dmActor.send({ type: "CLICK" });
   });
+
   dmActor.subscribe((snapshot) => {
     const meta: { view?: string } = Object.values(
       snapshot.context.spstRef.getSnapshot().getMeta(),
-    )[0] || {
-      view: undefined,
-    };
-    element.innerHTML = `${meta.view}`;
+    )[0] || { view: undefined };
+
+    // displaying "Click" during WaitToStart
+    if (snapshot.matches("WaitToStart")) {
+      element.textContent = "Click";
+    } else {
+      element.textContent = meta.view ?? "";
+    }
+  });
+}
+
+// updating dialogue context values
+export function setupDialogueDisplay() {
+  const idiomElement = document.querySelector<HTMLParagraphElement>(
+    "#current-idiom"
+  );
+
+  const contextElement = document.querySelector<HTMLParagraphElement>(
+    "#user-context"
+  );
+
+  const exampleElement = document.querySelector<HTMLParagraphElement>(
+    "#selected-example"
+  );
+
+  dmActor.subscribe((snapshot) => {
+    const {
+      currentIdiom,
+      userContext,
+      selectedExample
+    } = snapshot.context;
+
+    if (idiomElement) {
+      idiomElement.textContent =
+        currentIdiom || "No idiom selected yet";
+    }
+
+    if (contextElement) {
+      contextElement.textContent =
+        userContext || "No context provided yet";
+    }
+
+    if (exampleElement) {
+      exampleElement.textContent =
+        selectedExample?.sentence || "No example selected yet";
+    }
   });
 }
