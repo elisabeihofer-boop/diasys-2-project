@@ -277,7 +277,7 @@ const dmMachine = setup({
       }, // on: LISTEN_COMPLETE end
       states: {
         Prompt: { // greeting the user
-          entry: { type: "spst.speak", params: { utterance: `Welcome to: What do they actually mean? - your personal idiom explainer` } },
+          entry: { type: "spst.speak", params: { utterance: `Welcome to: What do they actually mean? - your personal idiom explainer. Which idiom is on your mind today?` } },
           on: { SPEAK_COMPLETE: "Ask" },
         }, // Prompt end
         NoInput: { // handling first and second time no input
@@ -443,7 +443,7 @@ const dmMachine = setup({
   		    query: context.currentIdiom, // querying using currentIdiom
         }),
 
-        // keeping the latest two user utterances for retrieval
+        // keeping the latest two user utterances for retrieval !!!
         /*
         input: ({ context }) => {
           // keeping only user messages
@@ -545,15 +545,15 @@ const dmMachine = setup({
                     content: event.value[0].utterance,
                   },
                 ],
-                //noInputCount: 0, // resetting no input counter if utterance recognised !!!
+                noInputCount: 0, // resetting no input counter if utterance recognised !!!
             })),
           ],
         },
 
         // deciding next dialogue step
         LISTEN_COMPLETE: [
+          // user provides context
           {
-            // user provides context
             guard: ({ context }) => 
               !!context.lastResult &&
               context.interpretation?.topIntent === "user_context" &&
@@ -600,9 +600,7 @@ const dmMachine = setup({
     }, // GetContext end
     GiveContext: {
       // the user wants to hear an example context from the system
-      // possibly: the user wants to hear another example context from the system
-
-      //dialogueIntent: "request_example",
+      // or: the user wants to hear another example context from the system
 
       entry: [
 
@@ -620,7 +618,18 @@ const dmMachine = setup({
               context.currentIdiom.toLowerCase()
           );
 
-          const examples = record?.example ?? [];
+          // filtering out literal examples from the dataset
+          const examples = (record?.example ?? []).filter((example) => {
+            const meaning = example.meaning.toLowerCase();
+            const explanation = example.explanation.toLowerCase();
+
+            return (
+              !meaning.includes("literal") &&
+              !meaning.includes("literally") &&
+              !explanation.includes("literal") &&
+              !explanation.includes("literally")
+            );
+          });
         
           // finding first unused example
           const nextIndex = examples.findIndex(
@@ -669,80 +678,90 @@ const dmMachine = setup({
       // the LLM is prompted with the retrieved context
       invoke: {
         src: "fetchLLM",
-        input: ({ context }) => ({
+
+        // making retrieved data for current idiom usable for conditional prompting
+        input: ({ context }) => {
+          const record = context.retrievedIdioms.find(
+            (item) =>
+              item.idiom.toLowerCase() ===
+              context.currentIdiom.toLowerCase()
+          );
+
+          return {
           messages: [
             {
               role: "system" as const,
 
-              // augmentation step: retrieved qdrant context -> system prompt
+              // augmentation: retrieved qdrant context -> (conditional) system prompt
               content: `
-                You are an assistant for language learners of English. You explain idioms.
-
+                You are an English idiom tutor for language learners.
                 You give short, concise answers.
 
-                Current task: ${context.dialogueIntent}
+                CURRENT IDIOM:
+                ${context.currentIdiom}
 
-                Follow the current task:
-                - explain_idiom: Explain the general meaning of the idiom.
-                - explain_context: Explain what the idiom means in the user's situation. (use user context)
-                - request_example: Present the selected example and explain it. (use selected example)
-                - more_details: Provide additional information about usage, register, or why the expression is idiomatic.
+                GENERAL MEANING:
+                ${record?.meaning ?? "Unknown"}
 
-                Only perform the current task.
-                Keep responses short and suitable for spoken dialogue.
-                
-                Use the retrieved information below to answer the user's question.
-                If the answer is not supported by the retrieved information, 
-                please let the user know that you do not have enough information to answer the question.
+                IDIOM EXPLANATION:
+                ${record?.explanation ?? "Not available"}
 
-                RETRIEVED IDIOM INFORMATION START
+                REGISTER:
+                ${record?.register ?? "Unknown"}
 
-                ${JSON.stringify(context.retrievedIdioms, null, 2)}
+                CURRENT TASK:
+                ${context.dialogueIntent}
 
-                RETRIEVED IDIOM INFORMATION END
+                ${
+                  context.dialogueIntent === "request_example"
+                    ? `
+                      CURRENT IDIOM:
+                      ${context.currentIdiom}
 
-                Explain the idiom in simple English.
-                If the user provided context, explain what the idiom means in that context.
+                      GENERAL MEANING:
+                      ${record?.meaning ?? "Unknown"}
 
-                USER CONTEXT START
+                      SELECTED EXAMPLE:
+                      ${JSON.stringify(context.selectedExample, null, 2)}
 
-                ${context.userContext}
+                      Read the content of the line below SELECTED EXAMPLE.
 
-                USER CONTEXT END
+                      Explain the meaning of the selected example in one or two short sentences.
+                      How does the selected example relate to the general meaning of the current idiom?
 
-                The retrieved examples may contain both literal and idiomatic uses of the expression.
-                Use the user's context (if available) to determine which interpretation is appropriate.
+                      ONLY explain!
+                    `
+                    : context.dialogueIntent === "explain_context"
+                    ? `
+                      USER'S CONTEXT:
+                      ${context.userContext}
 
-                If the current task is request_example:
-                Present the selected example in full to the learner and explain its meaning in simple English.
+                      Explain what the idiom means in this situation.
+                      Explain the speaker's likely intention.
+                      Do not invent details about the situation.
+                    `
+                    : `
+                      Explain the general meaning of the idiom.
+                      Give a short, clear explanation.
+                    `
+                }
 
-                Use the selected example rather than generating a new one.
-                Do not repeat previously presented examples.
-                Do not assume every selected example is idiomatic.
-
-                Keep the explanation to two or three short sentences.
-
-                SELECTED EXAMPLE START
-                
-                ${JSON.stringify(context.selectedExample, null, 2)}
-
-                SELECTED EXAMPLE END
-
-                Keep the responses concise and efficient.
+                Keep your response concise and suitable for spoken dialogue.
               `,
             },
             ...context.messages
           ],
-        }),
-        onDone: {
-          actions: assign({
-            messages: ({ context, event }) => [
-              ...context.messages,
-              {
-                role: "assistant",
-                content: event.output,
-              },
-            ],
+        };
+      },
+      onDone: {
+        actions: assign({
+          messages: ({ context, event }) => [
+            ...context.messages,
+            {
+              role: "assistant",
+              content: event.output,
+            },
+          ],
         }),
         target: "SpeakResponse",
         },
@@ -750,14 +769,31 @@ const dmMachine = setup({
     }, // GetCompletion end
     SpeakResponse: {
       // the system speaks the LLM generated response
-      entry: [
-        {
-          type: "spst.speak",
-          params: ({ context }) => ({
-            utterance: context.messages[context.messages.length - 1].content,
-          }),
+
+      entry: {
+        type: "spst.speak",
+        params: ({ context }) => {
+          const explanation =
+            context.messages[context.messages.length - 1].content;
+
+          // ensuring that the selected example is spoken exactly as in the data
+          if (
+            context.dialogueIntent === "request_example" &&
+            context.selectedExample
+          ) {
+            return {
+              utterance:
+                `Here's an example: ${context.selectedExample.sentence} ` +
+                explanation,
+            };
+          }
+          
+          // otherwise just LLM-generated text
+          return {
+            utterance: explanation,
+          };
         },
-      ],
+      },
       on: {
         SPEAK_COMPLETE: {
           target: "AnythingMore",
@@ -775,6 +811,18 @@ const dmMachine = setup({
         SPEAK_COMPLETE: "Greeting.Ask",
       },
     }, // AnythingMore end
+    Done: {
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance: "Thank you for exploring idioms with me! Click to ask again."
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "WaitToStart",
+      },
+
+    }, // Done end
   },
 });
 
