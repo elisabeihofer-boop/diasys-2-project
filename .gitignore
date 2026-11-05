@@ -2,6 +2,9 @@ starter/src/credentials.ts
 starter/src/azure.ts
 starter/node_modules
 
+starter-llm/src/credentials.ts
+starter-llm/node_modules
+
 rag/data
 rag/qdrant_data
 rag/qdrant_data.zip

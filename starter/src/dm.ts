@@ -357,7 +357,7 @@ const dmMachine = setup({
         type: "spst.speak",
         params: {
           utterance:
-            "Sorry, I didn't understand. Could you rephrase your question?",
+            "Sorry, I didn't understand. Could you rephrase that?",
         },
       },
       on: {
@@ -808,7 +808,7 @@ const dmMachine = setup({
                       ${context.userContext}
 
                       Explain what the idiom means in this situation.
-                      Explain the speaker's likely intention.
+                      Explain the speaker's likely intention. The speaker might not be the user.
                       Do not invent details about the situation.
                     `
                     : `
