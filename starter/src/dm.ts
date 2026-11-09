@@ -39,7 +39,7 @@ const azureProxyCredentials = {
 const azureLanguageCredentials = {
   endpoint: "https://lab-gusbeihel.cognitiveservices.azure.com/language/:analyze-conversations?api-version=2024-11-15-preview",
   key: NLU_KEY, 
-  deploymentName: "idiom_explainer",
+  deploymentName: "IdiomExplainer",
   projectName: "idiom_explainer",
   };
 
@@ -436,7 +436,7 @@ const dmMachine = setup({
                 Do not change anything about the user's context.
 
                 Do not explain the idiom.
-                Do not invent context based on the idiom.
+                NEVER infer a context from the idiom's meaning.
 
                 Example: 
                 {"idiom":"break the ice", "context":"My teacher said it yesterday."}
@@ -877,10 +877,31 @@ const dmMachine = setup({
         },
       ],
 
-      always: {
-        target: "GetCompletion",
-      },
+      always: [
+        // checking if an example was selected
+        {
+          guard: ({ context }) =>
+            context.selectedExample !== null,
+          target: "GetCompletion"
+        },
+        {
+          target: "NoExample",
+        },
+      ],
     }, // GiveContext end
+    NoExample: {
+      // the system informs the user that no example was found
+
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance: "Sorry, there's no example available actually. Is there anything else you want to know?"
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "Greeting.Ask",
+      },
+    }, // NoExample end
     GiveDetails: {
       // the user wants to know more details about the idiom (register, difficulty, why it's idiomatic)
 
