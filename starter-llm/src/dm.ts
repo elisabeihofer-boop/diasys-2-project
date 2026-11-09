@@ -339,6 +339,7 @@ const dmMachine = setup({
                 Do not change anything about the user's context.
 
                 Do not explain the idiom.
+                Do not invent context based on the idiom.
 
                 Example: 
                 {"idiom":"break the ice", "context":"My teacher said it yesterday."}

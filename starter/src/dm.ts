@@ -90,8 +90,6 @@ const dmMachine = setup({
           messages: input.messages,
         });
 
-      //console.log("LLM response:", response);
-
       return response.choices[0].message.content ?? "";
       },
     ),
@@ -192,12 +190,31 @@ const dmMachine = setup({
       on: { ASRTTS_READY: "WaitToStart" },
     }, // Prepare end
     WaitToStart: {
+
+      // resetting dialogue context for next session
+      entry: assign({
+        currentIdiom: "",
+        userContext: "",
+        retrievedIdioms: [],
+        selectedExample: null,
+        usedExampleIndices: [],
+        dialogueIntent: "explain_idiom",
+
+        interpretation: null,
+        lastResult: null,
+        noInputCount: 0,
+
+        messages: [
+          {
+            role: "system",
+            content: "You are a helpful idiom explainer for English language learners.",
+          },
+        ],
+      }),
+
       // waiting until the button is clicked
       on: { 
         CLICK: {
-          actions: assign({
-            noInputCount: 0, // resetting no input counter at restart
-          }),
           target: "Greeting",
         },
       },
@@ -217,43 +234,75 @@ const dmMachine = setup({
               context.interpretation?.topIntent === "new_idiom" &&
             // checking for confidence (should be over 65%)
               getIntentConfidence(context.interpretation, "new_idiom") > 0.65,
-            target: "ExtractRequest" // -> RAG pipeline
+
+            // setting dialogue intent
+            actions: assign({
+              dialogueIntent: "explain_idiom"
+            }),  
+
+            target: "ExtractRequest" // -> RAG pipeline directly
           },
+
           // user provides context
           {
             guard: ({ context }) => 
               !!context.lastResult &&
               context.interpretation?.topIntent === "user_context" &&
-            // checking for confidence (should be over 65%)
               getIntentConfidence(context.interpretation, "user_context") > 0.65,
-            target: "GetContext" // ???
+            
+            // saving utterance as user context immediately
+            actions: assign({
+              userContext: ({ context }) =>
+                context.lastResult?.[0]?.utterance ?? "",
+              dialogueIntent: "explain_context", // setting dialogue intent
+            }),
+              
+            target: "CheckIdiom" // ??? (changed from GetContext)
           },
+
           // user wants the system to provide a context example
           {
             guard: ({ context }) => 
               !!context.lastResult &&
               context.interpretation?.topIntent === "request_example" &&
-            // checking for confidence (should be over 65%)
               getIntentConfidence(context.interpretation, "request_example") > 0.65,
-            target: "GiveContext" // ???
+            
+            // setting dialogue intent
+            actions: assign({
+              dialogueIntent: "request_example",
+            }),
+            
+            target: "CheckIdiom" // ??? (changed from GiveContext)
           },
+
           // user wants to hear different context example
           {
             guard: ({ context }) => 
               !!context.lastResult &&
               context.interpretation?.topIntent === "different_example" &&
-            // checking for confidence (should be over 65%)
               getIntentConfidence(context.interpretation, "different_example") > 0.65,
-            target: "GiveContext" // different state ???
+            
+            // setting dialogue intent
+            actions: assign({
+              dialogueIntent: "request_example",
+            }),
+            
+            target: "CheckIdiom" // ??? (changed from GiveContext)
           },
+
           // user wants more in depth explanation of the current idiom
           {
             guard: ({ context }) => 
               !!context.lastResult &&
               context.interpretation?.topIntent === "more_details" &&
-            // checking for confidence (should be over 65%)
               getIntentConfidence(context.interpretation, "more_details") > 0.65,
-            target: "GiveDetails" // ???
+            
+            // setting dialogue intent
+            actions: assign({
+              dialogueIntent: "more_details"
+            }),
+
+            target: "CheckIdiom" // ??? (changed from GiveDetails)
           },
 
           // user says no (from AnythingMore)
@@ -261,7 +310,6 @@ const dmMachine = setup({
             guard: ({ context }) => 
               !!context.lastResult &&
               context.interpretation?.topIntent === "negation" &&
-            // checking for confidence (should be over 65%)
               getIntentConfidence(context.interpretation, "negation") > 0.65,
             target: "Done"
           },
@@ -366,11 +414,6 @@ const dmMachine = setup({
     }, // Clarify end
     ExtractRequest: {
       // sending the user utterance to LLM to extract the new idiom and possibly the context
-      
-      // setting dialogue intent (unnecessary here?) ????
-      entry: assign({
-        dialogueIntent: "explain_idiom"
-       }),
 
       // prompting LLM
       invoke: {
@@ -393,6 +436,7 @@ const dmMachine = setup({
                 Do not change anything about the user's context.
 
                 Do not explain the idiom.
+                Do not invent context based on the idiom.
 
                 Example: 
                 {"idiom":"break the ice", "context":"My teacher said it yesterday."}
@@ -414,8 +458,9 @@ const dmMachine = setup({
             guard: ({ event }) => !!event.output.idiom?.trim(), // going to Retrieval only if idiom was extracted
             actions: assign({
               currentIdiom: ({ event }) => event.output.idiom ?? "", // resetting/overwriting !!!!
-              userContext: ({ event }) => { // resetting/overwriting !!!!
+              userContext: ({ context, event }) => { // resetting/overwriting !!!!
                 // accounting for cases when the LLM might return "null" instead of null
+                // prioritizing previously saved context (from Greeting)
                 const value = event.output.context;
 
                 if (
@@ -423,13 +468,13 @@ const dmMachine = setup({
                   typeof value !== "string" ||
                   value.trim().toLowerCase() === "null"
                 ) {
-                  return "";
+                  return context.userContext;
                 }
-                return value.trim();
+
+                return context.userContext || value.trim();
               },
 
               // resetting upon successful extraction of new idiom
-              dialogueIntent: "explain_idiom",
               selectedExample: null,
               usedExampleIndices: [],
               retrievedIdioms: [],
@@ -474,24 +519,124 @@ const dmMachine = setup({
           };
         },
         */
-        onDone: {
-          actions: [
-            
-            // storing the retrieved info (for augmentation step)
-            assign({
-              retrievedIdioms: ({ event }) => event.output,
-              //currentIdiom: ({ event }) => event.output[0]?.idiom ?? "", // !!!
-            }),
-          
-            ({ event }) => {
-              console.log("Retrieved idioms:", event.output);  // control log
-            },
-          ],
+        onDone: [
 
-          target: "CheckContext",
-        },
+          // storing the retrieved info (for augmentation step)
+          {
+            guard: ({ context }) =>
+              context.dialogueIntent === "request_example",
+
+            actions: assign({
+              retrievedIdioms: ({ event }) => event.output,
+            }),
+
+            target: "GiveContext", // giving the user an example if originally detected intent was request_example or different_example
+          },
+          {
+            actions: assign({
+              retrievedIdioms: ({ event }) => event.output,
+            }),
+
+            target: "CheckContext",
+          },
+        ],
       },
     }, // Retrieve end
+    CheckIdiom: {
+      // checking if the user has provided an idiom (and an idiom has been retrieved)
+
+      always: [
+
+        // no idiom provided
+        {
+          guard: ({ context }) => 
+            !context.currentIdiom.trim() ||
+            context.retrievedIdioms.length === 0,
+
+          target: "AskIdiom", // asking for idiom
+        },
+
+        // user wants an example
+        {
+          guard: ({ context }) =>
+            context.interpretation?.topIntent === "request_example" ||
+            context.interpretation?.topIntent === "different_example",
+
+          target: "GiveContext", // sending to select example
+        },
+
+        // user wants more details
+        {
+          guard: ({ context }) =>
+            context.dialogueIntent === "more_details",
+
+          target: "GiveDetails",
+        },
+
+        // otherwise: continue on default pipeline
+        {
+          target: "CheckContext",
+        }
+      ],
+    }, // CheckIdiom end
+    AskIdiom: {
+      // the user has not yet provided an idiom, so the system asks for it
+
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance: "Which idiom would you like to know about?",
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "GetIdiom", // back to the beginning, where intent new_idiom should the be detected
+      },
+    }, // AskIdiom end
+    GetIdiom: {
+      // user provides idiom later in the dialogue
+
+      entry: [
+        assign({
+          lastResult: null,
+          interpretation: null,
+        }),
+        { type: "spst.listen" },
+      ],
+
+      on: {
+        RECOGNISED: {
+          actions: [
+            assign({ interpretation: ({ event }) => event.nluValue ?? null }),
+            
+            assign(({ context, event }) => ({
+              lastResult: event.value,
+              messages: [
+                ...context.messages,
+                {
+                  role: "user" as const,
+                  content: event.value[0].utterance,
+                },
+              ],
+              noInputCount: 0,
+            })),
+          ],
+        },
+
+        LISTEN_COMPLETE: [
+          {
+            guard: ({ context }) => !!context.lastResult &&
+              context.interpretation?.topIntent === "new_idiom" &&
+              // checking for confidence (should be over 65%)
+              getIntentConfidence(context.interpretation, "new_idiom") > 0.65,
+
+            target: "ExtractRequest",
+          },
+          {
+            target: "Clarify", // sending back to beginning basically
+          },
+        ],
+      },
+    }, // GetIdiom end
     CheckContext: {
       // checking if the user has already provided context
       always: [
@@ -512,7 +657,7 @@ const dmMachine = setup({
     }, // CheckContext end
     AskContext: {
       // user has not provided context, so system asks for context
-      // before general explanation !!!
+      // before general explanation by LLM
 
       entry: {
         type: "spst.speak",
@@ -675,7 +820,7 @@ const dmMachine = setup({
 
       entry: [
 
-          // setting dialogue intent
+          // setting dialogue intent (redundant ????)
           assign({
             dialogueIntent: "request_example",
           }),
@@ -739,10 +884,11 @@ const dmMachine = setup({
     GiveDetails: {
       // the user wants to know more details about the idiom (register, difficulty, why it's idiomatic)
 
-      // setting dialogue intent
-      entry: assign({
-        dialogueIntent: "more_details"
-      }),
+      // sending straight to generation step
+      // all data already available through retrieved idiom data
+      always: {
+        target: "GetCompletion",
+      },
 
     }, // GiveDetails end
     GetCompletion: {
@@ -780,28 +926,43 @@ const dmMachine = setup({
                 REGISTER:
                 ${record?.register ?? "Unknown"}
 
+                DIFFICULTY:
+                ${record?.difficulty ?? "Unknown"}
+
                 CURRENT TASK:
                 ${context.dialogueIntent}
 
                 ${
                   context.dialogueIntent === "request_example"
                     ? `
-                      CURRENT IDIOM:
-                      ${context.currentIdiom}
-
-                      GENERAL MEANING:
-                      ${record?.meaning ?? "Unknown"}
-
                       SELECTED EXAMPLE:
-                      ${JSON.stringify(context.selectedExample, null, 2)}
+                      ${context.selectedExample?.sentence ?? ""}
 
-                      Read the content of the line below SELECTED EXAMPLE.
+                      MEANING OF THIS EXAMPLE:
+                      ${context.selectedExample?.meaning ?? ""}
 
-                      Explain the meaning of the selected example in one or two short sentences.
-                      How does the selected example relate to the general meaning of the current idiom?
+                      EXPLANATION OF THIS EXAMPLE:
+                      ${context.selectedExample?.explanation ?? ""}
 
-                      ONLY explain!
+                      Your task is to help an English language learner understand how the idiom is used in the selected example.
+
+                      Explain:
+                      - What the idiom means in this particular sentence.
+                      - Why the speaker uses the expression in this situation.
+                      - The tone or intention, if relevant.
+
+                      Use the example's meaning and explanation as guidance.
+
+                      IMPORTANT:
+                      - Do not repeat or quote the selected example sentence.
+                      - Do not invent another example or situation.
+                      - Do not simply restate the example.
+                      - Explain in natural, simple English.
+                      - Give approximately 2 short sentences.
+
+                      Output ONLY the explanation.
                     `
+
                     : context.dialogueIntent === "explain_context"
                     ? `
                       USER'S CONTEXT:
@@ -811,6 +972,28 @@ const dmMachine = setup({
                       Explain the speaker's likely intention. The speaker might not be the user.
                       Do not invent details about the situation.
                     `
+                    : context.dialogueIntent === "more_details"
+                    ? `
+                      The learner wants additional information about the idiom "${context.currentIdiom}".
+
+                      Use the retrieved information above to explain:
+
+                      1. Why the expression is idiomatic or figurative, based on IDIOM EXPLANATION.
+
+                      2. Its register and when it is appropriate to use, based on REGISTER.
+
+                      3. Its difficulty and how hard it is for language learners to master, based on DIFFICULTY.
+
+                      3. Any additional nuances supported by the retrieved meaning and explanation.
+
+                      Do not simply repeat the general definition.
+                      Do not invent origins, cultural facts, or usage restrictions that are not in the retrieved data.
+                      If you do not have sufficient data, say so.
+                      Do not invent facts that are not backed up by the data you received.
+
+                      Explain in 3-4 clear sentences suitable for an English language learner.
+                    `
+
                     : `
                       Explain the general meaning of the idiom.
                       Give a short, clear explanation.
@@ -820,7 +1003,15 @@ const dmMachine = setup({
                 Keep your response concise and suitable for spoken dialogue.
               `,
             },
-            ...context.messages
+            // excluding conversation history when explaining selected example
+            ...(context.dialogueIntent === "request_example"
+              ? [
+                {
+                  role: "user" as const,
+                  content: "Please explain the selected example.",
+                },
+              ]
+              : context.messages)
           ],
         };
       },
