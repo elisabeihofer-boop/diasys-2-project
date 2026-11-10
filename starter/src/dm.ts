@@ -167,6 +167,9 @@ const dmMachine = setup({
     // used to distiguish tasks in LLM prompt
     dialogueIntent: "explain_idiom" as DialogueIntent,
 
+    // has the system already delivered an explanation?
+    hasExplainedIdiom: false,
+
     // for storing selected RAG example (by system)
     selectedExample: null as IdiomExample | null,
     usedExampleIndices: [] as number[],
@@ -199,6 +202,7 @@ const dmMachine = setup({
         selectedExample: null,
         usedExampleIndices: [],
         dialogueIntent: "explain_idiom",
+        hasExplainedIdiom: false,
 
         interpretation: null,
         lastResult: null,
@@ -237,7 +241,13 @@ const dmMachine = setup({
 
             // setting dialogue intent
             actions: assign({
-              dialogueIntent: "explain_idiom"
+              dialogueIntent: "explain_idiom",
+
+              // preserving context if no idiom stored (context provided first)
+              // clearing (old) context if idiom already stored (new idiom)
+              // !!!!
+              userContext: ({ context }) =>
+                context.currentIdiom ? "" : context.userContext,
             }),  
 
             target: "ExtractRequest" // -> RAG pipeline directly
@@ -460,7 +470,9 @@ const dmMachine = setup({
               currentIdiom: ({ event }) => event.output.idiom ?? "", // resetting/overwriting !!!!
               userContext: ({ context, event }) => { // resetting/overwriting !!!!
                 // accounting for cases when the LLM might return "null" instead of null
-                // prioritizing previously saved context (from Greeting)
+                
+                // prioritizing previously saved context (from Greeting; in case context came before idiom) !!!
+
                 const value = event.output.context;
 
                 if (
@@ -478,6 +490,7 @@ const dmMachine = setup({
               selectedExample: null,
               usedExampleIndices: [],
               retrievedIdioms: [],
+              hasExplainedIdiom: false,
             }),
             target: "Retrieve", // ???
           },
@@ -485,6 +498,13 @@ const dmMachine = setup({
             target: "Clarify",
           },
         ],
+        // in case something went wrong with invoking the LLM
+        onError: {
+          actions: ({ event }) => {
+            console.error("Extraction failed:", event.error);
+          },
+          target: "Error",
+        },
       }, // CHECK !!!!
     }, // ExtractRequest end
     Retrieve: { 
@@ -495,30 +515,6 @@ const dmMachine = setup({
   		    query: context.currentIdiom, // querying using currentIdiom
         }),
 
-        // keeping the latest two user utterances for retrieval !!!
-        /*
-        input: ({ context }) => {
-          // keeping only user messages
-          const userMessages = context.messages.filter(
-            (message) => message.role === "user",
-          );
-
-          // taking the two most recent user messages
-          const recentUserMessages = userMessages.slice(-2);
-
-          // combining them
-          const query = recentUserMessages
-            .map((message) => message.content)
-            .join("\n");
-
-          // control log
-          console.log("RAG query:", query);
-
-          return {
-            query: query,
-          };
-        },
-        */
         onDone: [
 
           // storing the retrieved info (for augmentation step)
@@ -540,6 +536,13 @@ const dmMachine = setup({
             target: "CheckContext",
           },
         ],
+
+        onError: {
+          actions: ({ event }) => {
+            console.error("Retrieval failed:", event.error);
+          },
+          target: "Error",
+        },
       },
     }, // Retrieve end
     CheckIdiom: {
@@ -568,7 +571,7 @@ const dmMachine = setup({
         // user wants more details
         {
           guard: ({ context }) =>
-            context.dialogueIntent === "more_details",
+            context.interpretation?.topIntent === "more_details",
 
           target: "GiveDetails",
         },
@@ -643,7 +646,7 @@ const dmMachine = setup({
         {
           guard: ({ context }) => context.userContext.trim().length > 0,
 
-          // setting dialogue intent
+          // setting dialogue intent !!!
           actions: assign({
             dialogueIntent: "explain_context"
           }),
@@ -820,19 +823,15 @@ const dmMachine = setup({
 
       entry: [
 
-          // setting dialogue intent (redundant ????)
+          // setting dialogue intent (in case GiveContext is not reached from Greeting)
           assign({
             dialogueIntent: "request_example",
           }),
 
           assign(({ context }) => {
 
-          // accessing retrieved Qdrant examples (filtering by currentIdiom)
-          const record = context.retrievedIdioms.find(
-            (item) =>
-              item.idiom.toLowerCase() ===
-              context.currentIdiom.toLowerCase()
-          );
+          // accessing retrieved Qdrant example (only one retrieved)
+          const record = context.retrievedIdioms[0];
 
           // filtering out literal examples from the dataset
           const examples = (record?.example ?? []).filter((example) => {
@@ -899,7 +898,23 @@ const dmMachine = setup({
         },
       },
       on: {
-        SPEAK_COMPLETE: "Greeting.Ask",
+        SPEAK_COMPLETE: [
+          // user has not received any explanation yet
+          {
+            guard: ({ context }) =>
+              !context.hasExplainedIdiom,
+
+            actions: assign({
+              dialogueIntent: "explain_idiom",
+            }),
+
+            target: "GetCompletion",
+          },
+          // user has already received an explanation (or at least one example)
+          {
+            target: "Greeting.Ask",
+          },
+        ],
       },
     }, // NoExample end
     GiveDetails: {
@@ -919,11 +934,7 @@ const dmMachine = setup({
 
         // making retrieved data for current idiom usable for conditional prompting
         input: ({ context }) => {
-          const record = context.retrievedIdioms.find(
-            (item) =>
-              item.idiom.toLowerCase() ===
-              context.currentIdiom.toLowerCase()
-          );
+          const record = context.retrievedIdioms[0];
 
           return {
           messages: [
@@ -1005,7 +1016,7 @@ const dmMachine = setup({
 
                       3. Its difficulty and how hard it is for language learners to master, based on DIFFICULTY.
 
-                      3. Any additional nuances supported by the retrieved meaning and explanation.
+                      4. Any additional nuances supported by the retrieved meaning and explanation.
 
                       Do not simply repeat the general definition.
                       Do not invent origins, cultural facts, or usage restrictions that are not in the retrieved data.
@@ -1048,6 +1059,13 @@ const dmMachine = setup({
         }),
         target: "SpeakResponse",
         },
+
+        onError: {
+          actions: ({ event }) => {
+            console.error("Completion failed:", event.error);
+          },
+          target: "Error",
+        },
       },
     }, // GetCompletion end
     SpeakResponse: {
@@ -1079,6 +1097,10 @@ const dmMachine = setup({
       },
       on: {
         SPEAK_COMPLETE: {
+          // recording that user has received an explanation or at least one example
+          actions: assign({
+            hasExplainedIdiom: true,
+          }),
           target: "AnythingMore",
         },
       },
@@ -1096,6 +1118,20 @@ const dmMachine = setup({
         SPEAK_COMPLETE: "Greeting.Ask",
       },
     }, // AnythingMore end
+    Error: {
+      // handling possible invocation failures
+
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance:
+            "Sorry, something went wrong. Please try again.",
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "Greeting.Ask",
+      },
+    }, // Error end
     Done: {
       // end state
 
