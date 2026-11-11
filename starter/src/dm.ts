@@ -59,6 +59,31 @@ function getIntentConfidence(nlu: NLUObject | null, intent: string): number {
   return nlu?.intents.find(i => i.category === intent)?.confidenceScore ?? 0;
 };
 
+// normalizing extracted idiom
+function normalizeIdiom(idiom: string): string {
+  return idiom
+    .toLowerCase()
+    .trim()
+    .replace(/[.,!?;:]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+// checking if there is a partial match for the extracted idiom in the retrieved idioms
+function isPartialMatch(
+  extracted: string,
+  retrieved: string
+): boolean {
+  const a = normalizeIdiom(extracted);
+  const b = normalizeIdiom(retrieved);
+
+  if (!a || !b) return false;
+
+  return (
+    ` ${a} `.includes(` ${b} `) ||
+    ` ${b} `.includes(` ${a} `)
+  );
+}
+
 const dmMachine = setup({
   types: {
     context: {} as DMContext,
@@ -120,7 +145,7 @@ const dmMachine = setup({
         const result = await qdrant.query("idioms", {
           query: embedding,
           with_payload: true,
-          limit: 1,
+          limit: 5,
         });
       
         // converting returned payloads into array
@@ -141,7 +166,7 @@ const dmMachine = setup({
             };
           });
 
-        //console.log("Qdrant payload:", retrievedIdioms);
+        console.log("Qdrant candidates:", retrievedIdioms.map((item) => item.idiom));
 
         return retrievedIdioms;
 
@@ -516,24 +541,105 @@ const dmMachine = setup({
         }),
 
         onDone: [
-
+          // matching idiom found:
           // storing the retrieved info (for augmentation step)
+
+          // exact match + user asked for example
           {
-            guard: ({ context }) =>
-              context.dialogueIntent === "request_example",
+            guard: ({ context, event }) =>
+              context.dialogueIntent === "request_example" &&
+              event.output.some(
+                (item) =>
+                  normalizeIdiom(item.idiom) ===
+                  normalizeIdiom(context.currentIdiom)
+              ),
 
             actions: assign({
-              retrievedIdioms: ({ event }) => event.output,
+              retrievedIdioms: ({ context, event }) =>
+                event.output.filter(
+                  (item) =>
+                    normalizeIdiom(item.idiom) ===
+                    normalizeIdiom(context.currentIdiom)
+                ),
             }),
 
             target: "GiveContext", // giving the user an example if originally detected intent was request_example or different_example
           },
+
+          // exact match + normal explanation
           {
+            guard: ({ context, event }) =>
+              event.output.some(
+                (item) =>
+                  normalizeIdiom(item.idiom) ===
+                  normalizeIdiom(context.currentIdiom)
+              ),
+
             actions: assign({
-              retrievedIdioms: ({ event }) => event.output,
+              retrievedIdioms: ({ context, event }) =>
+                event.output.filter(
+                  (item) =>
+                    normalizeIdiom(item.idiom) ===
+                    normalizeIdiom(context.currentIdiom)
+                ),
             }),
 
             target: "CheckContext",
+          },
+
+          // partial match + user asked for example
+          {
+            guard: ({ context, event }) =>
+              context.dialogueIntent === "request_example" &&
+              event.output.some(
+                (item) =>
+                  isPartialMatch(context.currentIdiom, item.idiom)
+              ),
+
+            actions: assign({
+              retrievedIdioms: ({ context, event }) => {
+                const match = event.output.find(
+                  (item) =>
+                    isPartialMatch(context.currentIdiom, item.idiom)
+                );
+
+                return match ? [match] : [];
+              },
+            }),
+
+            target: "GiveContext",
+          },
+
+          // partial match + normal explanation
+          {
+            guard: ({ context, event }) =>
+              event.output.some(
+                (item) =>
+                  isPartialMatch(context.currentIdiom, item.idiom)
+              ),
+
+            actions: assign({
+              retrievedIdioms: ({ context, event }) => {
+                const match = event.output.find(
+                  (item) =>
+                    isPartialMatch(context.currentIdiom, item.idiom)
+                );
+
+                return match ? [match] : [];
+              },
+            }),
+
+            target: "CheckContext",
+          },
+
+          // no matching idiom found
+          {
+            actions: assign({
+              currentIdiom: "",
+              retrievedIdioms: [],
+            }),
+
+            target: "IdiomNotFound",
           },
         ],
 
@@ -829,7 +935,7 @@ const dmMachine = setup({
 
           assign(({ context }) => {
 
-          // accessing retrieved Qdrant example (only one retrieved)
+          // accessing final stored idiom data
           const record = context.retrievedIdioms[0];
 
           // filtering out literal examples from the dataset
@@ -887,6 +993,20 @@ const dmMachine = setup({
         },
       ],
     }, // GiveContext end
+    IdiomNotFound: {
+      // the system lets the user know that it couldn't find a matching idiom in the database
+      
+      entry: {
+        type: "spst.speak",
+        params: {
+          utterance:
+            "Sorry, I couldn't find that idiom in my database. Could you try saying it differently?",
+        },
+      },
+      on: {
+        SPEAK_COMPLETE: "Greeting.Ask",
+      },
+    }, // IdiomNotFound end
     NoExample: {
       // the system informs the user that no example was found
 
@@ -933,6 +1053,8 @@ const dmMachine = setup({
 
         // making retrieved data for current idiom usable for conditional prompting
         input: ({ context }) => {
+
+          // using idiom data stored after filtering retrieval results
           const record = context.retrievedIdioms[0];
 
           return {
