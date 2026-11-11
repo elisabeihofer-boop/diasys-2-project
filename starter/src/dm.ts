@@ -592,7 +592,7 @@ const dmMachine = setup({
         },
       },
       on: {
-        SPEAK_COMPLETE: "GetIdiom", // back to the beginning, where intent new_idiom should the be detected
+        SPEAK_COMPLETE: "GetIdiom", // sending to get idiom
       },
     }, // AskIdiom end
     GetIdiom: {
@@ -629,7 +629,6 @@ const dmMachine = setup({
           {
             guard: ({ context }) => !!context.lastResult &&
               context.interpretation?.topIntent === "new_idiom" &&
-              // checking for confidence (should be over 65%)
               getIntentConfidence(context.interpretation, "new_idiom") > 0.65,
 
             target: "ExtractRequest",
@@ -894,7 +893,7 @@ const dmMachine = setup({
       entry: {
         type: "spst.speak",
         params: {
-          utterance: "Sorry, there's no example available actually. Is there anything else you want to know?"
+          utterance: "Sorry, there's no example available actually."
         },
       },
       on: {
@@ -912,7 +911,7 @@ const dmMachine = setup({
           },
           // user has already received an explanation (or at least one example)
           {
-            target: "Greeting.Ask",
+            target: "AnythingMore",
           },
         ],
       },
