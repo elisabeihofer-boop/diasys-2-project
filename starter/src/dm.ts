@@ -51,7 +51,7 @@ const settings: Settings = {
   asrDefaultNoInputTimeout: 5000,
   locale: "en-US",
   ttsDefaultVoice: "en-US-DavisNeural",
-  bargeIn: false, // ENABLE ????
+  bargeIn: false,
 };
 
 // checking the confidence score for the intents
