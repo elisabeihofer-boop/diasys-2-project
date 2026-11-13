@@ -59,7 +59,7 @@ function getIntentConfidence(nlu: NLUObject | null, intent: string): number {
   return nlu?.intents.find(i => i.category === intent)?.confidenceScore ?? 0;
 };
 
-// normalizing extracted idiom
+// normalizing idioms for comparison
 function normalizeIdiom(idiom: string): string {
   return idiom
     .toLowerCase()
@@ -270,7 +270,6 @@ const dmMachine = setup({
 
               // preserving context if no idiom stored (context provided first)
               // clearing (old) context if idiom already stored (new idiom)
-              // !!!!
               userContext: ({ context }) =>
                 context.currentIdiom ? "" : context.userContext,
             }),  
@@ -292,7 +291,7 @@ const dmMachine = setup({
               dialogueIntent: "explain_context", // setting dialogue intent
             }),
               
-            target: "CheckIdiom" // ??? (changed from GetContext)
+            target: "CheckIdiom" // sending to check that idiom available
           },
 
           // user wants the system to provide a context example
@@ -307,7 +306,7 @@ const dmMachine = setup({
               dialogueIntent: "request_example",
             }),
             
-            target: "CheckIdiom" // ??? (changed from GiveContext)
+            target: "CheckIdiom"
           },
 
           // user wants to hear different context example
@@ -322,7 +321,7 @@ const dmMachine = setup({
               dialogueIntent: "request_example",
             }),
             
-            target: "CheckIdiom" // ??? (changed from GiveContext)
+            target: "CheckIdiom"
           },
 
           // user wants more in depth explanation of the current idiom
@@ -337,7 +336,7 @@ const dmMachine = setup({
               dialogueIntent: "more_details"
             }),
 
-            target: "CheckIdiom" // ??? (changed from GiveDetails)
+            target: "CheckIdiom"
           },
 
           // user says no (from AnythingMore)
@@ -351,7 +350,7 @@ const dmMachine = setup({
 
           // handling unclear input
           { target: "Clarify",
-            guard: ({ context }) => !!context.lastResult, // CHECK !!!!
+            guard: ({ context }) => !!context.lastResult,
           },
 
           // third time no input (consecutively)
@@ -424,7 +423,7 @@ const dmMachine = setup({
               actions:
                 assign(({ context }) => ({
                     lastResult: null, // no Input -> clear lastResult
-                    interpretation: null, // clear interpretation !!!!
+                    interpretation: null, // clear NLU interpretation
                     noInputCount: context.noInputCount + 1, // increasing the count by one
               })),
             }, // ASR_NOINPUT end
@@ -444,7 +443,7 @@ const dmMachine = setup({
         },
       },
       on: {
-        SPEAK_COMPLETE: "Greeting.Ask", // change to whatever state it came from !!!!
+        SPEAK_COMPLETE: "Greeting.Ask", // back to central decision state
       },
     }, // Clarify end
     ExtractRequest: {
@@ -492,11 +491,12 @@ const dmMachine = setup({
           {
             guard: ({ event }) => !!event.output.idiom?.trim(), // going to Retrieval only if idiom was extracted
             actions: assign({
-              currentIdiom: ({ event }) => event.output.idiom ?? "", // resetting/overwriting !!!!
-              userContext: ({ context, event }) => { // resetting/overwriting !!!!
+              // storing extracted idiom
+              currentIdiom: ({ event }) => event.output.idiom ?? "",
+              userContext: ({ context, event }) => {
                 // accounting for cases when the LLM might return "null" instead of null
                 
-                // prioritizing previously saved context (from Greeting; in case context came before idiom) !!!
+                // prioritizing previously saved context (from Greeting; in case context came before idiom)
 
                 const value = event.output.context;
 
@@ -517,7 +517,7 @@ const dmMachine = setup({
               retrievedIdioms: [],
               hasExplainedIdiom: false,
             }),
-            target: "Retrieve", // ???
+            target: "Retrieve",
           },
           {
             target: "Clarify",
@@ -530,10 +530,11 @@ const dmMachine = setup({
           },
           target: "Error",
         },
-      }, // CHECK !!!!
+      },
     }, // ExtractRequest end
     Retrieve: { 
-      // invoking queryRAG to pass latest user utterance
+      // invoking queryRAG to retrieve candidate records (using extracted idiom)
+
       invoke: {
         src: "queryRAG",
         input: ({ context }) => ({
@@ -751,7 +752,7 @@ const dmMachine = setup({
         {
           guard: ({ context }) => context.userContext.trim().length > 0,
 
-          // setting dialogue intent !!!
+          // setting dialogue intent
           actions: assign({
             dialogueIntent: "explain_context"
           }),
@@ -872,7 +873,7 @@ const dmMachine = setup({
                         content: event.value[0].utterance,
                       },
                     ],
-                    noInputCount: 0, // resetting no input counter if utterance recognised !!!
+                    noInputCount: 0, // resetting no input counter if utterance recognised
                 })),
               ],
             },
@@ -959,7 +960,7 @@ const dmMachine = setup({
           // storing that example (or returning null if none left)
           if (nextIndex === -1) {
             return {
-              selectedExample: null, // UPGRADE !!!!
+              selectedExample: null,
             };
           }
 

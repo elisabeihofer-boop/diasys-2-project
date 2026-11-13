@@ -34,7 +34,7 @@ const settings: Settings = {
   asrDefaultNoInputTimeout: 5000,
   locale: "en-US",
   ttsDefaultVoice: "en-US-DavisNeural",
-  bargeIn: false, // ENABLE ????
+  bargeIn: false,
 };
 
 // checking the confidence score for the intents
@@ -172,6 +172,7 @@ const dmMachine = setup({
     }, // WaitToStart end
     Greeting: {
       // greeting + initial user ask is analyzed
+      
       initial: "Prompt",
       on: {
         LISTEN_COMPLETE: [
@@ -196,7 +197,7 @@ const dmMachine = setup({
                 context.currentIdiom ? "" : context.userContext,
             }),
 
-            target: "ExtractRequest" // ???
+            target: "ExtractRequest"
           },
           // user provides context
           {
@@ -212,7 +213,7 @@ const dmMachine = setup({
               dialogueIntent: "explain_context",
             }),
 
-            target: "CheckIdiom" // ???
+            target: "CheckIdiom" // sending to check if idiom available
           },
           // user wants the system to provide a context example
           {
@@ -266,7 +267,7 @@ const dmMachine = setup({
 
           // handling unclear input
           { target: "Clarify",
-            guard: ({ context }) => !!context.lastResult, // CHECK !!!!
+            guard: ({ context }) => !!context.lastResult,
           },
 
           // third time no input (consecutively)
@@ -339,7 +340,7 @@ const dmMachine = setup({
               actions:
                 assign(({ context }) => ({
                     lastResult: null, // no Input -> clear lastResult
-                    interpretation: null, // clear interpretation !!!!
+                    interpretation: null, // clear NLU interpretation
                     noInputCount: context.noInputCount + 1, // increasing the count by one
               })),
             }, // ASR_NOINPUT end
@@ -359,7 +360,7 @@ const dmMachine = setup({
         },
       },
       on: {
-        SPEAK_COMPLETE: "Greeting.Ask", // change to whatever state it came from !!!!
+        SPEAK_COMPLETE: "Greeting.Ask", // back to main decision state
       },
     }, // Clarify end
     ExtractRequest: {
@@ -408,11 +409,12 @@ const dmMachine = setup({
             guard: ({ event }) => !!event.output.idiom?.trim(), // going to Retrieval only if idiom was extracted
 
             actions: assign({
-              currentIdiom: ({ event }) => event.output.idiom ?? "", // resetting/overwriting !!!!
-              userContext: ({ context, event }) => { // resetting/overwriting !!!!
+              // storing extracted idiom
+              currentIdiom: ({ event }) => event.output.idiom ?? "", 
+              userContext: ({ context, event }) => { 
                 // accounting for cases when the LLM might return "null" instead of null
                 
-                // prioritizing previously saved context (from Greeting; in case context came before idiom) !!!
+                // prioritizing previously saved context (from Greeting; in case context came before idiom)
                 
                 const value = event.output.context;
 
@@ -448,8 +450,7 @@ const dmMachine = setup({
       },
     }, // ExtractRequest end
     CheckIdiom: {
-      // checking if the user has provided an idiom (and an idiom has been retrieved)
-
+      // checking if the user has provided an idiom
 
       always: [
 
@@ -559,7 +560,7 @@ const dmMachine = setup({
     }, // CheckContext end
     AskContext: {
       // user has not provided context, so system asks for context
-      // before general explanation !!!
+      // before general explanation by LLM
 
       entry: {
         type: "spst.speak",
@@ -666,7 +667,7 @@ const dmMachine = setup({
                         content: event.value[0].utterance,
                       },
                     ],
-                    noInputCount: 0, // resetting no input counter if utterance recognised !!!
+                    noInputCount: 0, // resetting no input counter if utterance recognised
                 })),
               ],
             },
@@ -742,7 +743,8 @@ const dmMachine = setup({
 
     }, // GiveDetails end
     GetCompletion: {
-      // the LLM is prompted with the retrieved context
+      // the LLM is prompted to generate a response based on the current dialogue task
+
       invoke: {
         src: "fetchLLM",
 
