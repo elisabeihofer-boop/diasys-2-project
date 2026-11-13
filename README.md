@@ -13,3 +13,11 @@ In this project I built an idiom explainer application in SpeechState/XState tha
   - `rag/src/main.ts`: script to upload processed dataset to Qdrant in batches
   - `starter`: contains code for RAG dialogue system
   - `starter-llm`: contains code for LLM-only dialogue system
+
+## Technologies
+- TypeScript
+- SpeechState / XState – Dialogue management
+- Microsoft Azure – Speech recognition, speech synthesis, and intent recognition
+- Ollama / Llama 3.2 – Idiom extraction and response generation
+- Qdrant – Vector database for the RAG-based system
+- Qwen3 Embedding – Semantic embeddings for idiom retrieval
